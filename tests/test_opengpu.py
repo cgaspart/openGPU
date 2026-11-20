@@ -99,3 +99,38 @@ class TestScan(unittest.TestCase):
         self.assertEqual([o.price_per_gpu_hr for o in groups[("H100-SXM", 80, "interruptible")]], [1.0, 2.0])
         self.assertEqual(list(rank(offers, "h100", tier="on-demand")), [("H100-SXM", 80, "on-demand")])
         self.assertEqual(len(rank(offers, "h100", limit=1)[("H100-SXM", 80, "interruptible")]), 1)
+
+
+import io
+import contextlib
+from datetime import datetime, timezone
+from opengpu.scan import ScanResult
+from opengpu.__main__ import main, render
+
+
+class TestCli(unittest.TestCase):
+    def run_main(self, argv, result):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = main(argv, scan_fn=lambda n, **kw: result)
+        return code, out.getvalue(), err.getvalue()
+
+    def test_render(self):
+        r = ScanResult([off(1.12)], ["runpod"], {})
+        text = render(rank(r.offers, "h100"), 1, r, datetime(2026, 11, 20, 14, 2, tzinfo=timezone.utc))
+        self.assertIn("H100-SXM 80GB × 1 · interruptible", text)
+        self.assertIn("scanned 14:02 UTC", text)
+        self.assertIn("1.120", text)
+        self.assertIn("skipped: runpod (no API key)", text)
+
+    def test_no_keys(self):
+        code, out, err = self.run_main(["H100"], ScanResult([], ["vast", "runpod"], {}))
+        self.assertEqual(code, 1)
+        self.assertIn("VAST_API_KEY", err)
+        self.assertIn("RUNPOD_API_KEY", err)
+
+    def test_no_match(self):
+        code, out, err = self.run_main(["H10O"], ScanResult([off(1.0)], [], {}))
+        self.assertEqual(code, 1)
+        self.assertIn("No offers for H10O × 1.", out)
+        self.assertIn("H100-SXM", out)
