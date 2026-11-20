@@ -2,7 +2,7 @@ import io
 import unittest
 import urllib.error
 from unittest import mock
-from opengpu.core import canonical_gpu, matches
+from opengpu.core import Offer, canonical_gpu, matches
 
 
 class TestNames(unittest.TestCase):
@@ -61,7 +61,7 @@ class TestVast(unittest.TestCase):
 
     def test_fetch_narrows_sampled_results_to_cheapest(self):
         # Vast answers broad searches with a ~50-offer sample, not the cheapest. Worst case: the priciest 50.
-        pool = [dict(ROW, id=i, num_gpus=1, dph_total=float(i), min_bid=float(i)) for i in range(1, 101)]
+        pool = [dict(ROW, id=i, machine_id=i, num_gpus=1, dph_total=float(i), min_bid=float(i)) for i in range(1, 101)]
         def fake_post(url, body, headers, timeout):
             field = "min_bid" if body["type"] == "bid" else "dph_total"
             cap = body.get(field, {}).get("lte", float("inf"))
@@ -72,6 +72,40 @@ class TestVast(unittest.TestCase):
         for tier in ("interruptible", "on-demand"):
             self.assertEqual(min(o.price_per_gpu_hr for o in offers if o.tier == tier), 1.0, tier)
 
+    def test_fetch_unions_parallel_samples(self):
+        # Vast samples server-side: identical simultaneous calls return different subsets.
+        import collections, threading
+        pool = [dict(ROW, id=i, machine_id=i, num_gpus=1, dph_total=float(i), min_bid=float(i)) for i in range(1, 22)]
+        calls, lock = collections.Counter(), threading.Lock()
+        def fake_post(url, body, headers, timeout):
+            with lock:
+                n = calls[body["type"]]
+                calls[body["type"]] += 1
+            return {"offers": pool[n % 3::3]}  # each call of a tier sees a different third
+        with mock.patch("opengpu.vast.post_json", fake_post):
+            offers = vast.fetch("k", 1, 5, "h100")
+        for tier in ("interruptible", "on-demand"):
+            prices = sorted(o.price_per_gpu_hr for o in offers if o.tier == tier)
+            self.assertEqual(prices[:4], [1.0, 2.0, 3.0, 4.0], tier)
+
+    def test_fetch_survives_some_rate_limited_samples(self):
+        import collections, threading
+        calls, lock = collections.Counter(), threading.Lock()
+        def fake_post(url, body, headers, timeout):
+            with lock:
+                n = calls[body["type"]]
+                calls[body["type"]] += 1
+            if n % 3:
+                raise urllib.error.HTTPError(url, 429, "Too Many Requests", {}, io.BytesIO(b""))
+            return {"offers": [dict(ROW, machine_id=1)]}
+        with mock.patch("opengpu.vast.post_json", fake_post):
+            self.assertEqual(len(vast.fetch("k", 1, 5, "h100")), 2)  # one offer per tier
+
+        def all_fail(url, body, headers, timeout):
+            raise urllib.error.HTTPError(url, 429, "Too Many Requests", {}, io.BytesIO(b""))
+        with mock.patch("opengpu.vast.post_json", all_fail), self.assertRaises(urllib.error.HTTPError):
+            vast.fetch("k", 1, 5, "h100")
+
     def test_parse_skips_bad_rows(self):
         bad = [dict(ROW, min_bid=None), dict(ROW, min_bid=0), dict(ROW, num_gpus=0)]
         self.assertEqual(vast.parse(bad, "interruptible"), [])
@@ -80,27 +114,36 @@ class TestVast(unittest.TestCase):
 
 from opengpu import runpod
 
-GT = {"id": "NVIDIA H100 80GB HBM3", "displayName": "H100 SXM", "memoryInGb": 80,
-      "securePrice": 2.99, "communityPrice": 2.69, "secureSpotPrice": 1.75,
-      "communitySpotPrice": None, "lowestPrice": {"stockStatus": "High"}}
+GT = {"id": "NVIDIA H100 80GB HBM3", "name": "H100 SXM", "memory": 80,
+      "price": {"secure": 4.39, "community": 2.69, "serverless": 5.89}, "availability": "MEDIUM"}
 
 
 class TestRunPod(unittest.TestCase):
     def test_parse(self):
-        offers = runpod.parse([GT], 2)
-        got = {(o.tier, o.fine_print, o.price_per_gpu_hr) for o in offers}
-        self.assertEqual(got, {
-            ("on-demand", "secure cloud", 2.99),
-            ("on-demand", "community cloud", 2.69),
-            ("interruptible", "secure cloud · ~5 s warning, volume kept", 1.75),
-        })
-        o = offers[0]
-        self.assertEqual((o.provider, o.gpu, o.gpu_count, o.vram_gb, o.region, o.offer_id),
-                         ("runpod", "H100-SXM", 2, 80, "-", "runpod:NVIDIA H100 80GB HBM3"))
+        [o] = runpod.parse([GT], 2, "SECURE")
+        self.assertEqual(o, Offer("runpod", "H100-SXM", 2, 80, "on-demand", 4.39, "-",
+                                  "secure cloud · stock medium", "runpod:NVIDIA H100 80GB HBM3"))
+        [o] = runpod.parse([GT], 1, "COMMUNITY")
+        self.assertEqual((o.price_per_gpu_hr, o.fine_print), (2.69, "community cloud · stock medium"))
 
-    def test_parse_skips_out_of_stock(self):
-        self.assertEqual(runpod.parse([dict(GT, lowestPrice={"stockStatus": None})], 1), [])
-        self.assertEqual(runpod.parse([dict(GT, lowestPrice=None)], 1), [])
+    def test_parse_skips_out_of_stock_or_unpriced(self):
+        self.assertEqual(runpod.parse([dict(GT, availability="NONE")], 1, "SECURE"), [])
+        self.assertEqual(runpod.parse([{k: v for k, v in GT.items() if k != "availability"}], 1, "SECURE"), [])
+        self.assertEqual(runpod.parse([dict(GT, price={"secure": None, "community": 0})], 1, "COMMUNITY"), [])
+
+    def test_fetch_asks_both_clouds_for_the_gpu_count(self):
+        calls = []
+        def fake_get(url, headers, timeout):
+            calls.append((url, headers["Authorization"]))
+            return {"gpus": [GT]}
+        with mock.patch("opengpu.runpod.get_json", fake_get):
+            offers = runpod.fetch("k", 2, 5, "h100")
+        self.assertEqual([c[1] for c in calls], ["Bearer k", "Bearer k"])
+        for url, cloud in zip((c[0] for c in calls), ("SECURE", "COMMUNITY")):
+            self.assertTrue(url.startswith("https://api.runpod.io/v2/catalog/gpus?"), url)
+            for part in ("include=AVAILABILITY", "product=POD", "count=2", f"cloud={cloud}"):
+                self.assertIn(part, url)
+        self.assertEqual(sorted(o.price_per_gpu_hr for o in offers), [2.69, 4.39])
 
 
 from opengpu.core import Offer

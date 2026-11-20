@@ -64,15 +64,42 @@ def parse(offers: list[dict], tier: str) -> list[Offer]:
     return out
 
 
+# Each Vast search returns roughly half the matches; 3 parallel searches miss a given offer ~10% of the
+# time. More samples hit Vast's rate limit (HTTP 429) on back-to-back scans.
+SAMPLES = 3
+
+
+def _sampled(body: dict, field: str, auth: dict, timeout: float) -> tuple[list[dict], int]:
+    """Union of SAMPLES identical searches, cheapest row per machine; plus the largest single answer size.
+    Failed samples (e.g. 429) are dropped; raises only if every sample failed."""
+    def one(_):
+        try:
+            return post_json(URL, body, auth, timeout)["offers"]
+        except Exception as e:
+            return e
+    with ThreadPoolExecutor(SAMPLES) as pool:
+        results = list(pool.map(one, range(SAMPLES)))
+    answers = [r for r in results if not isinstance(r, Exception)]
+    if not answers:
+        raise results[0]
+    best: dict = {}
+    for r in (r for answer in answers for r in answer):
+        machine = r.get("machine_id", r["id"])
+        if r.get(field) and (machine not in best or r[field] < best[machine][field]):
+            best[machine] = r
+    return list(best.values()), max(map(len, answers))
+
+
 def _cheapest(body: dict, field: str, auth: dict, timeout: float) -> list[dict]:
-    # ponytail: when more offers match, Vast returns a varying ~50-offer sample, not the cheapest.
-    # Re-ask under a ceiling (10th-cheapest price seen) until the answer is small enough to be complete.
-    rows = post_json(URL, body, auth, timeout)["offers"]
+    # ponytail: Vast samples server-side. Identical searches return different subsets, and broad ones
+    # are cut to ~50. Union parallel searches, then re-ask under a ceiling (10th-cheapest price seen)
+    # until single answers are small. Upgrade path: an official cheapest-first endpoint, if Vast adds one.
+    rows, largest = _sampled(body, field, auth, timeout)
     for _ in range(4):
-        prices = sorted(r[field] for r in rows if r.get(field))
-        if len(rows) < 40 or not prices:
+        prices = sorted(r[field] for r in rows)
+        if largest < 40 or not prices:
             break
-        rows = post_json(URL, dict(body, **{field: {"lte": prices[min(9, len(prices) - 1)]}}), auth, timeout)["offers"]
+        rows, largest = _sampled(dict(body, **{field: {"lte": prices[min(9, len(prices) - 1)]}}), field, auth, timeout)
     return rows
 
 

@@ -46,3 +46,9 @@ def post_json(url: str, body: dict, headers: dict, timeout: float) -> dict:
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.load(resp)
+
+
+def get_json(url: str, headers: dict, timeout: float) -> dict:
+    req = urllib.request.Request(url, headers={"User-Agent": "opengpu/0.1", **headers})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.load(resp)

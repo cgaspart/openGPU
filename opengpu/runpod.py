@@ -1,45 +1,34 @@
-from opengpu.core import Offer, canonical_gpu, post_json
+from opengpu.core import Offer, canonical_gpu, get_json
 
-URL = "https://api.runpod.io/graphql"
-QUERY = ("query { gpuTypes { id displayName memoryInGb securePrice communityPrice "
-         "secureSpotPrice communitySpotPrice lowestPrice(input: {gpuCount: %d}) { stockStatus } } }")
-SPOT_NOTE = " · ~5 s warning, volume kept"
-# RunPod prices are already per GPU per hour.
-PRICES = [
-    ("securePrice", "on-demand", "secure cloud"),
-    ("communityPrice", "on-demand", "community cloud"),
-    ("secureSpotPrice", "interruptible", "secure cloud" + SPOT_NOTE),
-    ("communitySpotPrice", "interruptible", "community cloud" + SPOT_NOTE),
-]
+# RunPod REST v2 (GraphQL is legacy and rejects new scoped keys). RunPod no longer sells spot
+# pods (every spot price in GraphQL is null as of 2026-11-20), so all offers are on-demand.
+URL = "https://api.runpod.io/v2/catalog/gpus?include=AVAILABILITY&product=POD&count={count}&cloud={cloud}"
+CLOUDS = ("SECURE", "COMMUNITY")
 
 
-def parse(gpu_types: list[dict], gpu_count: int) -> list[Offer]:
+def parse(gpus: list[dict], gpu_count: int, cloud: str) -> list[Offer]:
     out = []
-    for t in gpu_types:
-        # ponytail: stock checked per GPU type, not per secure/community cloud
-        if not (t.get("lowestPrice") or {}).get("stockStatus"):
+    for g in gpus:
+        stock = g.get("availability")
+        price = (g.get("price") or {}).get(cloud.lower())  # per GPU per hour
+        if stock in (None, "NONE") or not price or price <= 0:
             continue
-        for field, tier, note in PRICES:
-            price = t.get(field)
-            if not price or price <= 0:
-                continue
-            out.append(Offer(
-                provider="runpod",
-                gpu=canonical_gpu(t["displayName"]),
-                gpu_count=gpu_count,
-                vram_gb=t.get("memoryInGb") or 0,
-                tier=tier,
-                price_per_gpu_hr=price,
-                region="-",
-                fine_print=note,
-                offer_id=f"runpod:{t['id']}",
-            ))
+        out.append(Offer(
+            provider="runpod",
+            gpu=canonical_gpu(g["name"]),
+            gpu_count=gpu_count,
+            vram_gb=g.get("memory") or 0,
+            tier="on-demand",
+            price_per_gpu_hr=price,
+            region="-",
+            fine_print=f"{cloud.lower()} cloud · stock {stock.lower()}",
+            offer_id=f"runpod:{g['id']}",
+        ))
     return out
 
 
 def fetch(api_key: str, gpu_count: int, timeout: float, query: str) -> list[Offer]:
-    # RunPod returns every GPU type in one call; rank() filters by query.
-    reply = post_json(URL, {"query": QUERY % gpu_count}, {"Authorization": f"Bearer {api_key}"}, timeout)
-    if reply.get("errors"):
-        raise RuntimeError(reply["errors"][0].get("message", "GraphQL error"))
-    return parse(reply["data"]["gpuTypes"], gpu_count)
+    # One call per cloud returns every GPU type with stock for this count; rank() filters by query.
+    auth = {"Authorization": f"Bearer {api_key}"}
+    return [o for cloud in CLOUDS
+            for o in parse(get_json(URL.format(count=gpu_count, cloud=cloud), auth, timeout)["gpus"], gpu_count, cloud)]
