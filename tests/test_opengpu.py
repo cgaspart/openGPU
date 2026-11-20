@@ -1,4 +1,6 @@
+import io
 import unittest
+import urllib.error
 from opengpu.core import canonical_gpu, matches
 
 
@@ -41,6 +43,13 @@ class TestVast(unittest.TestCase):
         self.assertAlmostEqual(o.price_per_gpu_hr, 2.5)
         self.assertEqual(o.fine_print, "reliability 0.97 · +bandwidth fees")
 
+    def test_gpu_names(self):
+        self.assertEqual(vast.gpu_names("4090"), ["RTX 4090"])
+        self.assertEqual(vast.gpu_names("h100"), ["H100 NVL", "H100 PCIE", "H100 SXM"])
+        self.assertEqual(vast.gpu_names("A100 SXM"), ["A100 SXM4"])
+        self.assertEqual(vast.gpu_names("3060 ti"), ["RTX 3060 Ti"])
+        self.assertEqual(vast.gpu_names(" RTX 9999 "), ["RTX 9999"])
+
     def test_parse_skips_bad_rows(self):
         bad = [dict(ROW, min_bid=None), dict(ROW, min_bid=0), dict(ROW, num_gpus=0)]
         self.assertEqual(vast.parse(bad, "interruptible"), [])
@@ -82,8 +91,8 @@ def off(price, tier="interruptible", gpu="H100-SXM", provider="vast"):
 
 class TestScan(unittest.TestCase):
     def test_scan_isolates_failures_and_missing_keys(self):
-        def ok(key, n, t): return [off(1.0)]
-        def boom(key, n, t): raise TimeoutError("timed out")
+        def ok(key, n, t, q): return [off(1.0)]
+        def boom(key, n, t, q): raise TimeoutError("timed out")
         provs = {"a": ("A_KEY", ok), "b": ("B_KEY", boom), "c": ("C_KEY", ok)}
         r = scan(1, provs, env={"A_KEY": "secret", "B_KEY": "secret"})
         self.assertEqual(r.offers, [off(1.0)])
@@ -91,6 +100,16 @@ class TestScan(unittest.TestCase):
         self.assertEqual(list(r.failed), ["b"])
         self.assertIn("timed out", r.failed["b"])
         self.assertNotIn("secret", r.failed["b"])
+
+    def test_scan_passes_query_and_shows_http_error_body(self):
+        seen = []
+        def ok(key, n, t, q): seen.append(q); return []
+        def bad_key(key, n, t, q):
+            raise urllib.error.HTTPError("u", 404, "Not Found", {}, io.BytesIO(b'{"msg":"Invalid user key"}'))
+        r = scan(1, {"a": ("A_KEY", ok), "b": ("B_KEY", bad_key)}, env={"A_KEY": "k", "B_KEY": "k"}, query="h100")
+        self.assertEqual(seen, ["h100"])
+        self.assertIn("HTTP 404", r.failed["b"])
+        self.assertIn("Invalid user key", r.failed["b"])
 
     def test_rank_separates_tiers_and_sorts(self):
         offers = [off(2.0), off(1.0), off(0.5, "on-demand"), off(0.1, gpu="RTX-4090")]

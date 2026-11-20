@@ -1,4 +1,5 @@
 import os
+import urllib.error
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
@@ -18,18 +19,25 @@ class ScanResult:
     failed: dict[str, str]
 
 
-def scan(gpu_count: int, providers=PROVIDERS, env=os.environ, timeout: float = 20) -> ScanResult:
+def _reason(e: Exception) -> str:
+    if isinstance(e, urllib.error.HTTPError):
+        # The body says why (e.g. Vast answers a bad key with 404 "Invalid user key").
+        return f"HTTP {e.code}: {e.read(200).decode(errors='replace')}"[:120]
+    return f"{type(e).__name__}: {e}"[:80]
+
+
+def scan(gpu_count: int, providers=PROVIDERS, env=os.environ, timeout: float = 20, query: str = "") -> ScanResult:
     keys = {name: env.get(var) for name, (var, _) in providers.items()}
     skipped = [name for name, key in keys.items() if not key]
     active = [name for name in providers if keys[name]]
     offers, failed = [], {}
     with ThreadPoolExecutor() as pool:
-        futures = {name: pool.submit(providers[name][1], keys[name], gpu_count, timeout) for name in active}
+        futures = {name: pool.submit(providers[name][1], keys[name], gpu_count, timeout, query) for name in active}
         for name, fut in futures.items():
             try:
                 offers += fut.result()
             except Exception as e:
-                failed[name] = f"{type(e).__name__}: {e}"[:80]
+                failed[name] = _reason(e)
     return ScanResult(offers, skipped, failed)
 
 

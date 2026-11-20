@@ -50,7 +50,7 @@ def main(argv: list[str] | None = None, scan_fn=scan) -> int:
     args = p.parse_args(argv)
     gpu = " ".join(args.gpu)
 
-    result = scan_fn(args.count)
+    result = scan_fn(args.count, query=gpu)
     if len(result.skipped) == len(PROVIDERS):
         env_vars = ", ".join(var for var, _ in PROVIDERS.values())
         print(f"No API keys set. Set one of: {env_vars}", file=sys.stderr)

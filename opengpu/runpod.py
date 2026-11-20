@@ -37,7 +37,8 @@ def parse(gpu_types: list[dict], gpu_count: int) -> list[Offer]:
     return out
 
 
-def fetch(api_key: str, gpu_count: int, timeout: float) -> list[Offer]:
+def fetch(api_key: str, gpu_count: int, timeout: float, query: str) -> list[Offer]:
+    # RunPod returns every GPU type in one call; rank() filters by query.
     reply = post_json(URL, {"query": QUERY % gpu_count}, {"Authorization": f"Bearer {api_key}"}, timeout)
     if reply.get("errors"):
         raise RuntimeError(reply["errors"][0].get("message", "GraphQL error"))
