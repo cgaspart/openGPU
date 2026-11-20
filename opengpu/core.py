@@ -22,7 +22,6 @@ ALIASES = {
     "H100-80GB-HBM3": "H100-SXM",
     "H100-SXM5": "H100-SXM",
     "A100-SXM4": "A100-SXM",
-    "RTX-6000ADA": "RTX-6000-ADA",
 }
 
 _NOISE = re.compile(r"\b(NVIDIA|GEFORCE|TESLA)\b")
@@ -30,6 +29,7 @@ _NOISE = re.compile(r"\b(NVIDIA|GEFORCE|TESLA)\b")
 
 def canonical_gpu(name: str) -> str:
     cleaned = re.sub(r"[^A-Z0-9]+", "-", _NOISE.sub("", name.upper())).strip("-")
+    cleaned = re.sub(r"(\d)ADA\b", r"\1-ADA", cleaned)  # Vast "RTX 4000Ada" == "RTX 4000 Ada"
     return ALIASES.get(cleaned, cleaned)
 
 

@@ -1,3 +1,5 @@
+from concurrent.futures import ThreadPoolExecutor
+
 from opengpu.core import Offer, canonical_gpu, matches, post_json
 
 URL = "https://console.vast.ai/api/v0/bundles/"
@@ -24,6 +26,15 @@ NAMES = (
 )
 
 
+MARKETED_GB = (6, 8, 10, 11, 12, 16, 20, 24, 32, 40, 48, 80, 94, 96, 141, 180, 192)
+
+
+def vram_gb(mib: float) -> int:
+    """nvidia-smi MiB -> marketed GB (46068 MiB is a 48 GB card), so groups line up with other providers."""
+    gib = mib / 1024
+    return next((gb for gb in MARKETED_GB if gb >= gib - 0.5), round(gib))
+
+
 def gpu_names(query: str) -> list[str]:
     """Vast gpu_name values matching the query; the raw query itself if none are known."""
     return [n for n in NAMES if matches(query, canonical_gpu(n))] or [query.strip()]
@@ -43,7 +54,7 @@ def parse(offers: list[dict], tier: str) -> list[Offer]:
             provider="vast",
             gpu=canonical_gpu(o["gpu_name"]),
             gpu_count=gpus,
-            vram_gb=round((o.get("gpu_ram") or 0) / 1024),
+            vram_gb=vram_gb(o.get("gpu_ram") or 0),
             tier=tier,
             price_per_gpu_hr=price / gpus,
             region=(o.get("geolocation") or "-").split(",")[-1].strip(),
@@ -53,16 +64,29 @@ def parse(offers: list[dict], tier: str) -> list[Offer]:
     return out
 
 
+def _cheapest(body: dict, field: str, auth: dict, timeout: float) -> list[dict]:
+    # ponytail: when more offers match, Vast returns a varying ~50-offer sample, not the cheapest.
+    # Re-ask under a ceiling (10th-cheapest price seen) until the answer is small enough to be complete.
+    rows = post_json(URL, body, auth, timeout)["offers"]
+    for _ in range(4):
+        prices = sorted(r[field] for r in rows if r.get(field))
+        if len(rows) < 40 or not prices:
+            break
+        rows = post_json(URL, dict(body, **{field: {"lte": prices[min(9, len(prices) - 1)]}}), auth, timeout)["offers"]
+    return rows
+
+
 def fetch(api_key: str, gpu_count: int, timeout: float, query: str) -> list[Offer]:
     auth = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-    offers = []
-    for tier, search_type in SEARCH_TYPE.items():
+
+    def one_tier(tier: str) -> list[Offer]:
         body = {
             "verified": {"eq": True}, "external": {"eq": False},
             "rentable": {"eq": True}, "rented": {"eq": False},
-            "num_gpus": {"eq": gpu_count}, "gpu_name": {"in": gpu_names(query)}, "type": search_type,
+            "num_gpus": {"eq": gpu_count}, "gpu_name": {"in": gpu_names(query)}, "type": SEARCH_TYPE[tier],
             "order": [["dph_total", "asc"]], "limit": 64, "allocated_storage": 5.0,
         }
-        reply = post_json(URL, body, auth, timeout)
-        offers += parse(reply["offers"], tier)
-    return offers
+        return parse(_cheapest(body, PRICE_FIELD[tier], auth, timeout), tier)
+
+    with ThreadPoolExecutor() as pool:
+        return [o for tier_offers in pool.map(one_tier, SEARCH_TYPE) for o in tier_offers]

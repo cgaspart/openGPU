@@ -22,7 +22,11 @@ class ScanResult:
 def _reason(e: Exception) -> str:
     if isinstance(e, urllib.error.HTTPError):
         # The body says why (e.g. Vast answers a bad key with 404 "Invalid user key").
-        return f"HTTP {e.code}: {e.read(200).decode(errors='replace')}"[:120]
+        try:
+            body = " ".join(e.read(200).decode(errors="replace").split())
+        except Exception:
+            body = e.reason
+        return f"HTTP {e.code}: {body}"[:120]
     return f"{type(e).__name__}: {e}"[:80]
 
 

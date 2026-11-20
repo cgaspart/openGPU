@@ -2,6 +2,8 @@ import argparse
 import sys
 from datetime import datetime, timezone
 
+from opengpu import vast
+from opengpu.core import canonical_gpu
 from opengpu.scan import PROVIDERS, ScanResult, rank, scan
 
 COLUMNS = ["$/GPU-hr", "provider", "region", "fine print", "offer"]
@@ -59,7 +61,8 @@ def main(argv: list[str] | None = None, scan_fn=scan) -> int:
     groups = rank(result.offers, gpu, args.tier, args.limit)
     if not groups:
         print(f"No offers for {gpu} × {args.count}.")
-        print("Seen: " + (", ".join(sorted({o.gpu for o in result.offers})) or "none"))
+        known = {o.gpu for o in result.offers} | {canonical_gpu(n) for n in vast.NAMES}
+        print("Known GPUs: " + ", ".join(sorted(known)))
         if _footer(result):
             print(_footer(result))
         return 1
