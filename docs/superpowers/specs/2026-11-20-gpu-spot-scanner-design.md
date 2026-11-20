@@ -100,3 +100,15 @@ the cheapest. Live prices from this scanner fill that gap.
 
 - Exact API calls and field mapping per provider (verify against current docs).
 - Contents of the GPU name mapping table.
+
+## Findings after the build (2026-11-20)
+
+- **RunPod no longer sells spot pods.** Every spot price in its API is empty, so RunPod
+  offers are on-demand only. The scanner uses RunPod's REST v2 catalog (its GraphQL API is
+  legacy and rejects newer scoped keys).
+- **Vast samples search results server-side**, even with an API key: identical simultaneous
+  searches return different subsets (about half the matches each), and broad searches are cut
+  to ~50 offers. The scanner unions 3 parallel searches under a shrinking price ceiling, so the
+  cheapest shown is best-effort (a given offer is missed ~10% of the time). More samples trip
+  Vast's rate limit (HTTP 429).
+- **Vast's price search works without an API key.** The scanner still requires `VAST_API_KEY`.

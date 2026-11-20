@@ -1,0 +1,119 @@
+from concurrent.futures import ThreadPoolExecutor
+
+from opengpu.core import Offer, canonical_gpu, matches, post_json
+
+URL = "https://console.vast.ai/api/v0/bundles/"
+PRICE_FIELD = {"interruptible": "min_bid", "on-demand": "dph_total"}
+SEARCH_TYPE = {"interruptible": "bid", "on-demand": "on-demand"}
+
+# ponytail: snapshot of Vast gpu_name values (2026-11-20). Vast returns at most 64 offers per
+# search and only filters names by exact match, so we send the matching names. Refresh by paging
+# /bundles/ ordered by gpu_name with gpu_name > last seen.
+NAMES = (
+    "A10", "A100 PCIE", "A100 SXM4", "A16", "A30X", "A40", "A800 PCIE", "B200", "B300", "CMP 170HX",
+    "GB10", "GB200", "GB300", "GTX 1060", "GTX 1070", "GTX 1080", "GTX 1080 Ti", "GTX 1650", "GTX 1660",
+    "GTX 1660 S", "GTX 1660 Ti", "GTX TITAN X", "H100 NVL", "H100 PCIE", "H100 SXM", "H200", "H200 NVL",
+    "L4", "L40", "L40S", "Q RTX 5000", "Q RTX 6000", "Q RTX 8000", "Quadro P4000", "RTX 2000Ada",
+    "RTX 2060S", "RTX 2070", "RTX 2070S", "RTX 2080 Ti", "RTX 3050", "RTX 3060", "RTX 3060 Ti",
+    "RTX 3060 laptop", "RTX 3070 Ti", "RTX 3080", "RTX 3080 Ti", "RTX 3090", "RTX 3090 Ti", "RTX 4000Ada",
+    "RTX 4060", "RTX 4060 Ti", "RTX 4070", "RTX 4070 Ti", "RTX 4070 laptop", "RTX 4070S", "RTX 4070S Ti",
+    "RTX 4080", "RTX 4080 laptop", "RTX 4080S", "RTX 4090", "RTX 4500Ada", "RTX 5000Ada", "RTX 5060",
+    "RTX 5060 Ti", "RTX 5070", "RTX 5070 Ti", "RTX 5080", "RTX 5090", "RTX 5090D", "RTX 5880Ada",
+    "RTX 6000Ada", "RTX 6000D", "RTX A2000", "RTX A4000", "RTX A4500", "RTX A5000", "RTX A6000",
+    "RTX PRO 4000", "RTX PRO 4500", "RTX PRO 5000", "RTX PRO 6000 Max-Q", "RTX PRO 6000 S",
+    "RTX PRO 6000 WS", "T4G", "Tesla P100", "Tesla P40", "Tesla T4", "Tesla V100", "Tesla V100S",
+    "Titan RTX", "Titan V",
+)
+
+
+MARKETED_GB = (6, 8, 10, 11, 12, 16, 20, 24, 32, 40, 48, 80, 94, 96, 141, 180, 192)
+
+
+def vram_gb(mib: float) -> int:
+    """nvidia-smi MiB -> marketed GB (46068 MiB is a 48 GB card), so groups line up with other providers."""
+    gib = mib / 1024
+    return next((gb for gb in MARKETED_GB if gb >= gib - 0.5), round(gib))
+
+
+def gpu_names(query: str) -> list[str]:
+    """Vast gpu_name values matching the query; the raw query itself if none are known."""
+    return [n for n in NAMES if matches(query, canonical_gpu(n))] or [query.strip()]
+
+
+def parse(offers: list[dict], tier: str) -> list[Offer]:
+    out = []
+    for o in offers:
+        price, gpus = o.get(PRICE_FIELD[tier]), o.get("num_gpus")
+        if not price or price <= 0 or not gpus:
+            continue
+        notes = ["outbid → paused, disk kept"] if tier == "interruptible" else []
+        if o.get("reliability2") is not None:
+            notes.append(f"reliability {o['reliability2']:.2f}")
+        notes.append("+bandwidth fees")
+        out.append(Offer(
+            provider="vast",
+            gpu=canonical_gpu(o["gpu_name"]),
+            gpu_count=gpus,
+            vram_gb=vram_gb(o.get("gpu_ram") or 0),
+            tier=tier,
+            price_per_gpu_hr=price / gpus,
+            region=(o.get("geolocation") or "-").split(",")[-1].strip(),
+            fine_print=" · ".join(notes),
+            offer_id=f"vast:{o['id']}",
+        ))
+    return out
+
+
+# Each Vast search returns roughly half the matches; 3 parallel searches miss a given offer ~10% of the
+# time. More samples hit Vast's rate limit (HTTP 429) on back-to-back scans.
+SAMPLES = 3
+
+
+def _sampled(body: dict, field: str, auth: dict, timeout: float) -> tuple[list[dict], int]:
+    """Union of SAMPLES identical searches, cheapest row per machine; plus the largest single answer size.
+    Failed samples (e.g. 429) are dropped; raises only if every sample failed."""
+    def one(_):
+        try:
+            return post_json(URL, body, auth, timeout)["offers"]
+        except Exception as e:
+            return e
+    with ThreadPoolExecutor(SAMPLES) as pool:
+        results = list(pool.map(one, range(SAMPLES)))
+    answers = [r for r in results if not isinstance(r, Exception)]
+    if not answers:
+        raise results[0]
+    best: dict = {}
+    for r in (r for answer in answers for r in answer):
+        machine = r.get("machine_id", r["id"])
+        if r.get(field) and (machine not in best or r[field] < best[machine][field]):
+            best[machine] = r
+    return list(best.values()), max(map(len, answers))
+
+
+def _cheapest(body: dict, field: str, auth: dict, timeout: float) -> list[dict]:
+    # ponytail: Vast samples server-side. Identical searches return different subsets, and broad ones
+    # are cut to ~50. Union parallel searches, then re-ask under a ceiling (10th-cheapest price seen)
+    # until single answers are small. Upgrade path: an official cheapest-first endpoint, if Vast adds one.
+    rows, largest = _sampled(body, field, auth, timeout)
+    for _ in range(4):
+        prices = sorted(r[field] for r in rows)
+        if largest < 40 or not prices:
+            break
+        rows, largest = _sampled(dict(body, **{field: {"lte": prices[min(9, len(prices) - 1)]}}), field, auth, timeout)
+    return rows
+
+
+def fetch(api_key: str, gpu_count: int, timeout: float, query: str) -> list[Offer]:
+    auth = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+
+    def one_tier(tier: str) -> list[Offer]:
+        body = {
+            "verified": {"eq": True}, "external": {"eq": False},
+            "rentable": {"eq": True}, "rented": {"eq": False},
+            "num_gpus": {"eq": gpu_count}, "gpu_name": {"in": gpu_names(query)}, "type": SEARCH_TYPE[tier],
+            "order": [["dph_total", "asc"]], "limit": 64, "allocated_storage": 5.0,
+        }
+        return parse(_cheapest(body, PRICE_FIELD[tier], auth, timeout), tier)
+
+    with ThreadPoolExecutor() as pool:
+        return [o for tier_offers in pool.map(one_tier, SEARCH_TYPE) for o in tier_offers]
