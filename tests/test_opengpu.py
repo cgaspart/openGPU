@@ -45,3 +45,28 @@ class TestVast(unittest.TestCase):
         bad = [dict(ROW, min_bid=None), dict(ROW, min_bid=0), dict(ROW, num_gpus=0)]
         self.assertEqual(vast.parse(bad, "interruptible"), [])
         self.assertEqual(len(vast.parse([dict(ROW, geolocation=None)], "on-demand")), 1)
+
+
+from opengpu import runpod
+
+GT = {"id": "NVIDIA H100 80GB HBM3", "displayName": "H100 SXM", "memoryInGb": 80,
+      "securePrice": 2.99, "communityPrice": 2.69, "secureSpotPrice": 1.75,
+      "communitySpotPrice": None, "lowestPrice": {"stockStatus": "High"}}
+
+
+class TestRunPod(unittest.TestCase):
+    def test_parse(self):
+        offers = runpod.parse([GT], 2)
+        got = {(o.tier, o.fine_print, o.price_per_gpu_hr) for o in offers}
+        self.assertEqual(got, {
+            ("on-demand", "secure cloud", 2.99),
+            ("on-demand", "community cloud", 2.69),
+            ("interruptible", "secure cloud · ~5 s warning, volume kept", 1.75),
+        })
+        o = offers[0]
+        self.assertEqual((o.provider, o.gpu, o.gpu_count, o.vram_gb, o.region, o.offer_id),
+                         ("runpod", "H100-SXM", 2, 80, "-", "runpod:NVIDIA H100 80GB HBM3"))
+
+    def test_parse_skips_out_of_stock(self):
+        self.assertEqual(runpod.parse([dict(GT, lowestPrice={"stockStatus": None})], 1), [])
+        self.assertEqual(runpod.parse([dict(GT, lowestPrice=None)], 1), [])
