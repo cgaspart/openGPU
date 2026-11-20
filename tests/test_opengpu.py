@@ -70,3 +70,32 @@ class TestRunPod(unittest.TestCase):
     def test_parse_skips_out_of_stock(self):
         self.assertEqual(runpod.parse([dict(GT, lowestPrice={"stockStatus": None})], 1), [])
         self.assertEqual(runpod.parse([dict(GT, lowestPrice=None)], 1), [])
+
+
+from opengpu.core import Offer
+from opengpu.scan import scan, rank
+
+
+def off(price, tier="interruptible", gpu="H100-SXM", provider="vast"):
+    return Offer(provider, gpu, 1, 80, tier, price, "US", "", f"{provider}:{price}")
+
+
+class TestScan(unittest.TestCase):
+    def test_scan_isolates_failures_and_missing_keys(self):
+        def ok(key, n, t): return [off(1.0)]
+        def boom(key, n, t): raise TimeoutError("timed out")
+        provs = {"a": ("A_KEY", ok), "b": ("B_KEY", boom), "c": ("C_KEY", ok)}
+        r = scan(1, provs, env={"A_KEY": "secret", "B_KEY": "secret"})
+        self.assertEqual(r.offers, [off(1.0)])
+        self.assertEqual(r.skipped, ["c"])
+        self.assertEqual(list(r.failed), ["b"])
+        self.assertIn("timed out", r.failed["b"])
+        self.assertNotIn("secret", r.failed["b"])
+
+    def test_rank_separates_tiers_and_sorts(self):
+        offers = [off(2.0), off(1.0), off(0.5, "on-demand"), off(0.1, gpu="RTX-4090")]
+        groups = rank(offers, "h100")
+        self.assertEqual(list(groups), [("H100-SXM", 80, "interruptible"), ("H100-SXM", 80, "on-demand")])
+        self.assertEqual([o.price_per_gpu_hr for o in groups[("H100-SXM", 80, "interruptible")]], [1.0, 2.0])
+        self.assertEqual(list(rank(offers, "h100", tier="on-demand")), [("H100-SXM", 80, "on-demand")])
+        self.assertEqual(len(rank(offers, "h100", limit=1)[("H100-SXM", 80, "interruptible")]), 1)
