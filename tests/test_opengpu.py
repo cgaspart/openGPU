@@ -303,3 +303,56 @@ class TestAzure(unittest.TestCase):
         self.assertEqual(len(urls), 2)
         self.assertIn("Standard_NC40ads_H100_v5", urllib.parse.unquote(urls[0]))
         self.assertEqual(sorted(o.price_per_gpu_hr for o in offers), [1.5, 7.0])
+
+
+from opengpu import skypilot
+
+H100_INFO = "{'Gpus': [{'Name': 'H100', 'Manufacturer': 'NVIDIA', 'Count': 8, 'MemoryInfo': {'SizeInMiB': 81920}}], 'TotalGpuMemoryInMiB': 655360}"
+
+
+def aws_row(az_spot, region="us-east-1", name="H100", count="8.0", info=H100_INFO, price="55.04"):
+    return {"InstanceType": "p5.48xlarge", "AcceleratorName": name, "AcceleratorCount": count, "GpuInfo": info,
+            "Price": price, "SpotPrice": az_spot, "Region": region}
+
+
+def gcp_row(name, count, region, price, spot, instance="", mib=81920):
+    return {"InstanceType": instance, "AcceleratorName": name, "AcceleratorCount": count,
+            "GpuInfo": f"{{'Gpus': [{{'MemoryInfo': {{'SizeInMiB': {mib}}}}}]}}" if name else "",
+            "Region": region, "Price": price, "SpotPrice": spot}
+
+
+class TestSkyPilot(unittest.TestCase):
+    def test_aws_cheapest_zone_per_region(self):
+        rows = [aws_row("24.0"), aws_row("16.0"), aws_row("20.0", region="us-west-2"),
+                aws_row("", region="eu-west-1"),  # no spot here
+                aws_row("8.0", count="1.0"),  # other count
+                aws_row("1.0", name="Inferentia2", info="{'Gpus': [{'Name': 'Inferentia2', 'Manufacturer': 'AWS'}]}")]
+        got = sorted((o.region, o.tier, o.price_per_gpu_hr) for o in skypilot.parse_aws(rows, 8))
+        self.assertEqual(got, [("eu-west-1", "on-demand", 6.88), ("us-east-1", "interruptible", 2.0),
+                               ("us-east-1", "on-demand", 6.88), ("us-west-2", "interruptible", 2.5),
+                               ("us-west-2", "on-demand", 6.88)])
+        o = skypilot.parse_aws([aws_row("16.0")], 8)[0]
+        self.assertEqual((o.provider, o.gpu, o.vram_gb, o.offer_id), ("aws", "H100-SXM", 80, "aws:p5.48xlarge"))
+
+    def test_gcp_adds_the_vm_to_the_gpu_price(self):
+        rows = [gcp_row("H100", "1", "us-central1", "9.79655", "5.8339"),
+                gcp_row("", "", "us-central1", "1.18251", "0.70455", instance="a3-highgpu-1g"),
+                gcp_row("H100", "1", "asia-east1", "11.0", "6.0"),  # no a3 VM price there: skipped
+                gcp_row("T4", "1", "us-central1", "0.35", "0.1976", mib=16384),
+                gcp_row("", "", "us-central1", "0.38", "0.09", instance="n1-standard-8"),
+                gcp_row("tpu-v6e-1", "1", "us-central1", "2.7", "1.0")]
+        got = {(o.gpu, o.tier): (round(o.price_per_gpu_hr, 5), o.vram_gb, o.region, o.offer_id)
+               for o in skypilot.parse_gcp(rows, 1)}
+        self.assertEqual(got, {
+            ("H100-SXM", "interruptible"): (6.53845, 80, "us-central1", "gcp:a3-highgpu-1g"),
+            ("H100-SXM", "on-demand"): (10.97906, 80, "us-central1", "gcp:a3-highgpu-1g"),
+            ("T4", "interruptible"): (0.2876, 16, "us-central1", "gcp:n1-standard-8"),
+            ("T4", "on-demand"): (0.73, 16, "us-central1", "gcp:n1-standard-8"),
+        })
+
+    def test_gcp_price_per_gpu(self):
+        rows = [gcp_row("L4", "4", "us-central1", "2.24016", "1.3408", mib=24576),
+                gcp_row("", "", "us-central1", "1.0", "", instance="g2-standard-48")]  # VM has no spot price
+        [o] = skypilot.parse_gcp(rows, 4)
+        self.assertEqual((o.tier, o.offer_id), ("on-demand", "gcp:g2-standard-48"))
+        self.assertAlmostEqual(o.price_per_gpu_hr, 3.24016 / 4)

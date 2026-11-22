@@ -3,7 +3,7 @@ import urllib.error
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
-from opengpu import azure, runpod, vast, verda
+from opengpu import azure, runpod, skypilot, vast, verda
 from opengpu.core import Offer, matches
 
 PROVIDERS = {
@@ -11,6 +11,8 @@ PROVIDERS = {
     "runpod": ("RUNPOD_API_KEY", runpod.fetch),
     "verda": (None, verda.fetch),
     "azure": (None, azure.fetch),
+    "aws": (None, skypilot.aws),
+    "gcp": (None, skypilot.gcp),
 }
 
 

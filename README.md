@@ -24,6 +24,8 @@ Prices are per GPU-hour in USD. Storage, bandwidth, and interruption terms go in
 | RunPod | `RUNPOD_API_KEY` | on-demand | RunPod no longer sells spot pods |
 | Verda (DataCrunch) | none | interruptible, on-demand | Stock not checked |
 | Azure | none | interruptible, on-demand | Needs quota on your subscription |
+| AWS | none | interruptible, on-demand | From SkyPilot's price catalog, updated ~2×/day. Needs quota |
+| GCP | none | interruptible, on-demand | From SkyPilot's price catalog. Price includes the VM the GPU is attached to. Needs quota |
 
 Keys come from the environment. Providers without a key are skipped, and a failing provider doesn't stop the scan. Both are listed under the results.
 

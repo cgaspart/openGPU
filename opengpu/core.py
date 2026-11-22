@@ -1,3 +1,5 @@
+import csv
+import io
 import json
 import re
 import urllib.request
@@ -54,3 +56,9 @@ def get_json(url: str, headers: dict, timeout: float) -> dict:
     req = urllib.request.Request(url, headers={"User-Agent": "opengpu/0.1", **headers})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.load(resp)
+
+
+def get_csv(url: str, timeout: float) -> list[dict]:
+    req = urllib.request.Request(url, headers={"User-Agent": "opengpu/0.1"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return list(csv.DictReader(io.TextIOWrapper(resp, encoding="utf-8")))
