@@ -111,4 +111,4 @@ the cheapest. Live prices from this scanner fill that gap.
   to ~50 offers. The scanner unions 3 parallel searches under a shrinking price ceiling, so the
   cheapest shown is best-effort (a given offer is missed ~10% of the time). More samples trip
   Vast's rate limit (HTTP 429).
-- **Vast's price search works without an API key.** The scanner still requires `VAST_API_KEY`.
+- **Vast's price search works without an API key.** The scanner no longer asks for `VAST_API_KEY`.

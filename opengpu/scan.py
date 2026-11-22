@@ -3,12 +3,16 @@ import urllib.error
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
-from opengpu import runpod, vast
+from opengpu import azure, runpod, skypilot, vast, verda
 from opengpu.core import Offer, matches
 
 PROVIDERS = {
-    "vast": ("VAST_API_KEY", vast.fetch),
+    "vast": (None, vast.fetch),
     "runpod": ("RUNPOD_API_KEY", runpod.fetch),
+    "verda": (None, verda.fetch),
+    "azure": (None, azure.fetch),
+    "aws": (None, skypilot.aws),
+    "gcp": (None, skypilot.gcp),
 }
 
 
@@ -31,9 +35,10 @@ def _reason(e: Exception) -> str:
 
 
 def scan(gpu_count: int, providers=PROVIDERS, env=os.environ, timeout: float = 20, query: str = "") -> ScanResult:
-    keys = {name: env.get(var) for name, (var, _) in providers.items()}
-    skipped = [name for name, key in keys.items() if not key]
-    active = [name for name in providers if keys[name]]
+    # var None = public prices, no key needed.
+    keys = {name: env.get(var) if var else "" for name, (var, _) in providers.items()}
+    skipped = [name for name, (var, _) in providers.items() if var and not keys[name]]
+    active = [name for name in providers if name not in skipped]
     offers, failed = [], {}
     with ThreadPoolExecutor() as pool:
         futures = {name: pool.submit(providers[name][1], keys[name], gpu_count, timeout, query) for name in active}

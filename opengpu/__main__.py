@@ -12,7 +12,7 @@ COLUMNS = ["$/GPU-hr", "provider", "region", "fine print", "offer"]
 def _footer(result: ScanResult) -> str:
     parts = []
     if result.skipped:
-        parts.append("skipped: " + ", ".join(f"{n} (no API key)" for n in result.skipped))
+        parts.append("skipped: " + ", ".join(f"{n} (set {PROVIDERS[n][0]})" for n in result.skipped))
     if result.failed:
         parts.append("failed: " + ", ".join(f"{n} ({why})" for n, why in result.failed.items()))
     return " · ".join(parts)
@@ -53,11 +53,6 @@ def main(argv: list[str] | None = None, scan_fn=scan) -> int:
     gpu = " ".join(args.gpu)
 
     result = scan_fn(args.count, query=gpu)
-    if len(result.skipped) == len(PROVIDERS):
-        env_vars = ", ".join(var for var, _ in PROVIDERS.values())
-        print(f"No API keys set. Set one of: {env_vars}", file=sys.stderr)
-        return 1
-
     groups = rank(result.offers, gpu, args.tier, args.limit)
     if not groups:
         print(f"No offers for {gpu} × {args.count}.")
