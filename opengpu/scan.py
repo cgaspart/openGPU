@@ -7,7 +7,7 @@ from opengpu import azure, runpod, vast, verda
 from opengpu.core import Offer, matches
 
 PROVIDERS = {
-    "vast": ("VAST_API_KEY", vast.fetch),
+    "vast": (None, vast.fetch),
     "runpod": ("RUNPOD_API_KEY", runpod.fetch),
     "verda": (None, verda.fetch),
     "azure": (None, azure.fetch),
